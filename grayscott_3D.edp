@@ -1,0 +1,189 @@
+// =========================================================================================
+// Gray Scott Model
+// =========================================================================================
+load "iovtk"; // for saving data in paraview format
+load "msh3";
+load "medit";
+load "tetgen";
+verbosity=0;
+real wdate=1;
+string filename="energyData.m"; // for saving datat in matlab format
+string foldername = "data"; //for saving ParaView Data
+exec("mkdir "+foldername);
+
+real dt=1.0; //time step size
+int nTimestep = 20000; //number of iterations
+real iterguarda=100; // iterations between each save for paraview
+real iterdib=1; // in which iteration start saving for paraview
+
+//-----------------------------------------------------------------------------------------
+// Set Parameters
+//-----------------------------------------------------------------------------------------
+real time=0.0;
+real gammau=1.0e-3, gammav=0.5e-3; // diffusion coefficients
+real feed = 0.03, kill=0.062; //reaction coefficients
+
+load "tetgen"
+
+
+// Parameters
+real hh = 0.1;
+real radius = 2.5; // Sphere radius
+
+// Mesh 2D
+mesh Th2 = square(10, 20, [x*pi-pi/2, 2*y*pi]); // ]-pi/2, pi/2[X]0,2pi[
+
+// Sphere parametrization (radius 2.5)
+func f1 = radius * cos(x)*cos(y);
+func f2 = radius * cos(x)*sin(y);
+func f3 = radius * sin(x);
+
+// Partial derivatives for metric
+func f1x = radius * -sin(x)*cos(y);
+func f1y = radius * -cos(x)*sin(y);
+func f2x = radius * -sin(x)*sin(y);
+func f2y = radius * cos(x)*cos(y);
+func f3x = radius * cos(x);
+func f3y = 0;
+
+// Metric tensor M = DF^t DF
+func m11 = f1x^2 + f2x^2 + f3x^2;
+func m21 = f1x*f1y + f2x*f2y + f3x*f3y;
+func m22 = f1y^2 + f2y^2 + f3y^2;
+
+// Periodic condition
+func perio = [[4, y], [2, y], [1, x], [3, x]];
+
+// Mesh adaptation
+real vv = 1/square(hh);
+Th2 = adaptmesh(Th2, m11*vv, m21*vv, m22*vv, IsMetric=1, periodic=perio);
+Th2 = adaptmesh(Th2, m11*vv, m21*vv, m22*vv, IsMetric=1, periodic=perio);
+plot(Th2, wait=true);
+
+// Define multiple layers for better internal structure
+real[int] domain = [
+    0., 0., 0., 0.25*radius, 0.005,  // Innermost layer
+    0., 0., 0., 0.5*radius, 0.01,   // Middle layer
+    0., 0., 0., 0.75*radius, 0.015, // Outer-middle layer
+    0., 0., 0., radius, 0.02        // Surface layer
+];
+
+// Generate 3D mesh with multiple regions
+mesh3 Th = tetgtransfo(Th2, transfo=[f1, f2, f3], nbofregions=4, regionlist=domain);
+plot(Th, wait=true);
+
+//-----------------------------------------------------------------------------------------
+// Set Finite Element Spaces
+//-----------------------------------------------------------------------------------------
+// fespace Xh(Th,P1,periodic=[[1,y,z],[2,y,z],[3,x,z],[4,x,z],[5,x,y],[6,x,y]]); //define a Finite Element space
+fespace Xh(Th,P1);
+//P1 = Piecewise Linear Finite Elements
+//periodic boundary conditions
+Xh u,u0,ub,uh;
+Xh v,v0,vb,vh;
+
+
+//-----------------------------------------------------------------------------------------
+// Define Weak Formulation
+//-----------------------------------------------------------------------------------------
+problem GSu ( [u],[uh])=
+	int3d(Th) ( //integral containing all u^n+1 terms
+			(1/dt)*u*uh
+			+ gammau*(dx(u)*dx(uh) + dy(u)*dy(uh) + dz(u)*dz(uh))
+			)
+	+int3d(Th) ( //integral containing all other terms
+			- (1/dt)*u0*uh
+			// + gammau*(dx(u0)*dx(uh) + dy(u0)*dy(uh))
+			+ u0*v0*v0*uh
+			- feed*(1.0 - u0)*uh
+			)
+// +on(1,2,3,4, u = ub)
+;
+
+problem GSv ( [v],[vh])=
+	int3d(Th) ( //integral containing all v^n+1 terms
+			(1/dt)*v*vh
+			+ gammav*(dx(v)*dx(vh) + dy(v)*dy(vh) + dz(v)*dz(vh))
+			)
+	+int3d(Th) ( //integral containing all other terms
+			- (1/dt)*v0*vh
+			// + gammav*(dx(v0)*dx(vh) + dy(v0)*dy(vh))
+			- u0*v0*v0*vh
+			+ (feed + kill)*v0*vh
+			)
+// +on(1,2,3,4, v = vb)
+;
+
+//-----------------------------------------------------------------------------------------
+// Set the Initial Condition
+//-----------------------------------------------------------------------------------------
+func real finit(real xx, real yy, real zz){ //Creates a circle with value 1 in center. 0 outside
+	real width = 0.5;
+	if (xx*xx + yy*yy + zz*zz < width){
+		return 1.0;
+	}
+	else {
+		return 0.0;
+	}
+}
+v0 = finit(x,y,z); //initial v uses f
+u0 = 1.0; //inital u is 1 everwhere
+Xh d = u0/(u0 + v0); // concentration of u
+
+//-----------------------------------------------------------------------------------------
+//SAVE INITIAL DATA
+//-----------------------------------------------------------------------------------------
+
+savevtk(foldername+"/"+"Data_Paraview_0.vtu",Th,u,v,dataname="u v"); // saving data for ParaView
+
+
+//-----------------------------------------------------------------------------------------
+// Run the Main Routine
+//-----------------------------------------------------------------------------------------
+for (int i=1;i<=nTimestep;i++){
+
+time = time + dt;//update time
+
+GSu; //solve the problem for u
+GSv; //solve the problem for v
+// d = u/(u + v); //update concentration
+// u = max(min(u,1.0),0.0); //clamp u,v between 0 and 1
+// v = max(min(v,1.0),0.0);
+// plot(d, fill=true, value=true); //plot d
+
+// update for next iteration
+u0  = u;
+v0 = v;
+
+cout << "time = " << time <<  endl;
+
+if (abs(iterdib-i)<1e-5) {
+savevtk(foldername+"/"+"Data_Paraview_"+i+".vtu",Th,u,v,dataname="u v"); //saving data for ParaView
+iterdib=iterdib+iterguarda;
+{
+ofstream gnu(foldername+"/"+"u_" + i + ".gp");
+gnu <<u[]<<endl;
+}
+{
+ofstream gnu(foldername+"/"+"v_" + i + ".gp");
+gnu <<v[]<<endl;
+}
+}
+
+}
+//-----------------------------------------------------------------------------------------
+// END OF the Main Routine
+//-----------------------------------------------------------------------------------------
+
+
+//-----------------------------------------------------------------------------------------
+// SAVING FINAL DATA
+//-----------------------------------------------------------------------------------------
+{
+ofstream gnu("u" + nTimestep + ".gp");
+gnu <<u[]<<endl;
+}
+{
+ofstream gnu("v" + nTimestep + ".gp");
+gnu <<v[]<<endl;
+}
